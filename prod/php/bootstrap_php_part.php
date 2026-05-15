@@ -8,34 +8,37 @@ use OpenTelemetry\Distro\OTelDistroScoperConfig;
  * Directory Layout after package install
  *
  *          bootstrap_php_part.php
- *          vendor_81/
- *              OTelDistroScoped/
- *                  Contrib/
+ *          ScoperConfig.php
+ *          85 (<PHP major><PHP minor>)
+ *              OpenTelemetry/  (under this directory the layout is the same as in <repo>/prod/php/OpenTelemetry/)
+ *                  ...
  *                  Distro/
- *                  Instrumentation/
+ *                  ...
+ *              vendor/
  */
 
-$vendorDir = __DIR__ . DIRECTORY_SEPARATOR . 'vendor_' . PHP_MAJOR_VERSION . PHP_MINOR_VERSION;
+$prodPhpDir = __DIR__ . DIRECTORY_SEPARATOR . PHP_MAJOR_VERSION . PHP_MINOR_VERSION;
+$vendorDir = $prodPhpDir . DIRECTORY_SEPARATOR . 'vendor';
+$otelDistroDir = $prodPhpDir . DIRECTORY_SEPARATOR . 'OpenTelemetry' . DIRECTORY_SEPARATOR . 'Distro';
+
 require __DIR__ . DIRECTORY_SEPARATOR . 'ScoperConfig.php';
-$scopedDistroRootDir = $vendorDir . DIRECTORY_SEPARATOR . OTelDistroScoperConfig::DISTRO_PATH;
-$otelDistroDir = $scopedDistroRootDir . DIRECTORY_SEPARATOR . 'Distro';
 /** @noinspection PhpFullyQualifiedNameUsageInspection */
 $scopePrefixIfEnabled = \OpenTelemetry\Distro\get_config_option_by_name('debug_scoper_enabled') ? (OTelDistroScoperConfig::PREFIX . '\\') : '';
 
+require $otelDistroDir . DIRECTORY_SEPARATOR . 'ProdPhpDir.php';
 /**
  * @noinspection PhpFullyQualifiedNameUsageInspection
  * @var class-string<\OpenTelemetry\Distro\ProdPhpDir> $prodPhpDirClass
  */
 $prodPhpDirClass = $scopePrefixIfEnabled . 'OpenTelemetry\\Distro\\ProdPhpDir';
-require $otelDistroDir . DIRECTORY_SEPARATOR . 'ProdPhpDir.php';
-$prodPhpDirClass::$fullPath = $scopedDistroRootDir;
+$prodPhpDirClass::$fullPath = $prodPhpDir;
 
+require $otelDistroDir . DIRECTORY_SEPARATOR . 'VendorDir.php';
 /**
  * @noinspection PhpFullyQualifiedNameUsageInspection
  * @var class-string<\OpenTelemetry\Distro\VendorDir> $vendorDirClass
  */
 $vendorDirClass = $scopePrefixIfEnabled . 'OpenTelemetry\\Distro\\VendorDir';
-require $otelDistroDir . DIRECTORY_SEPARATOR . 'VendorDir.php';
 $vendorDirClass::$fullPath = $vendorDir;
 
 require $otelDistroDir . '/BootstrapStageLoggingClassTrait.php';

@@ -83,8 +83,8 @@ final class PhpPartFacade
         }
 
         try {
-            require __DIR__ . DIRECTORY_SEPARATOR . 'AutoloaderDistroOTelClasses.php';
-            AutoloaderDistroOTelClasses::register(__NAMESPACE__, __DIR__);
+            require __DIR__ . DIRECTORY_SEPARATOR . 'AutoloaderForClassesInDirectory.php';
+            AutoloaderForClassesInDirectory::register(dirRootNamespace: __NAMESPACE__, dirFullPath: __DIR__);
 
             InstrumentationBridge::singletonInstance()->bootstrap();
             self::prepareForOTelSdk();
@@ -263,7 +263,7 @@ final class PhpPartFacade
             self::logDebug(__LINE__, __FUNCTION__, 'OTEL_PHP_NATIVE_OTLP_SERIALIZER_ENABLED set to false');
         } else {
             // Load classes such as \OpenTelemetry\Contrib\Otlp\SpanExporter to shadow the ones in SDK
-            $otelOtlpDir = ProdPhpDir::$fullPath . DIRECTORY_SEPARATOR . 'Contrib' . DIRECTORY_SEPARATOR . 'Otlp';
+            $otelOtlpDir = ProdPhpDir::$fullPath . DIRECTORY_SEPARATOR . 'OpenTelemetry' . DIRECTORY_SEPARATOR . 'Contrib' . DIRECTORY_SEPARATOR . 'Otlp';
             foreach (['SpanExporter', 'LogsExporter', 'MetricExporter'] as $exporter) {
                 require $otelOtlpDir . DIRECTORY_SEPARATOR . $exporter . '.php';
             }

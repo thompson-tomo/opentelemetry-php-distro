@@ -118,11 +118,11 @@ final class HttpClientUtilForTests
     }
 
     /** @noinspection PhpUnused */
-    public static function createCurlHandleToSendRequestToAppCode(UrlParts $urlParts, TestInfraDataPerRequest $dataPerRequest, ResourcesClient $resourcesClient): CurlHandleForTests
+    public static function createCurlHandleToSendRequestToAppCode(UrlParts $urlParts, TestInfraDataPerRequest $dataPerRequest, ResourcesCleanerClient $resourcesCleanerClient): CurlHandleForTests
     {
         $curlInitRetVal = curl_init(UrlUtil::buildFullUrl($urlParts));
         Assert::assertInstanceOf(CurlHandle::class, $curlInitRetVal);
-        $curlHandle = new CurlHandleForTests($curlInitRetVal, $resourcesClient);
+        $curlHandle = new CurlHandleForTests($curlInitRetVal, $resourcesCleanerClient);
         $dataPerRequestHeaderName = RequestHeadersRawSnapshotSource::optionNameToHeaderName(OptionForTestsName::data_per_request->name);
         $dataPerRequestHeaderVal = PhpSerializationUtil::serializeToString($dataPerRequest);
         $curlHandle->setOpt(CURLOPT_HTTPHEADER, [$dataPerRequestHeaderName . ': ' . $dataPerRequestHeaderVal]);

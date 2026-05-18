@@ -111,13 +111,13 @@ class ComponentTestCaseBase extends TestCaseBase
         }
     }
 
-    protected static function buildResourcesClientForAppCode(): ResourcesClient
+    protected static function buildResourcesCleanerClientForAppCode(): ResourcesCleanerClient
     {
         $resCleanerId = AmbientContextForTests::testConfig()->dataPerProcess()->resourcesCleanerSpawnedProcessInternalId;
         Assert::assertNotNull($resCleanerId);
         $resCleanerPort = AmbientContextForTests::testConfig()->dataPerProcess()->resourcesCleanerPort;
         Assert::assertNotNull($resCleanerPort);
-        return new ResourcesClient($resCleanerId, $resCleanerPort);
+        return new ResourcesCleanerClient($resCleanerId, $resCleanerPort);
     }
 
     public static function isSmoke(): bool

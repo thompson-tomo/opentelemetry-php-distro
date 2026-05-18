@@ -196,8 +196,8 @@ final class PDOAutoInstrumentationTest extends ComponentTestCaseBase
 
         $dbName = $dbNameArg;
         if ($dbNameArg === self::FILE_DB_NAME) {
-            $resourcesClient = $testCaseHandle->getResourcesClient();
-            $dbFileFullPath = $resourcesClient->createTempFile('temp DB for ' . ClassNameUtil::fqToShort(__CLASS__));
+            $resourcesCleanerClient = $testCaseHandle->getResourcesCleanerClient();
+            $dbFileFullPath = $resourcesCleanerClient->createTempFile('temp DB for ' . ClassNameUtil::fqToShort(__CLASS__));
             $dbName = $dbFileFullPath;
             $appCodeRequestArgs[DbAutoInstrumentationUtilForTests::DB_NAME_KEY] = $dbName;
         }

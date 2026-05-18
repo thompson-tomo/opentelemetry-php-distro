@@ -26,7 +26,7 @@ final class AppCodeContextDataUtil
      */
     public static function createTempFile(TestCaseHandle $testCaseHandle, /* in,out */ array &$appCodeRequestArgs): void
     {
-        $tempFilePath = $testCaseHandle->getResourcesClient()->createTempFile('app_code_context_data');
+        $tempFilePath = $testCaseHandle->getResourcesCleanerClient()->createTempFile('app_code_context_data');
         ArrayUtilForTests::addAssertingKeyNew(self::FILE_PATH_KEY, $tempFilePath, /* in,out */ $appCodeRequestArgs);
     }
 

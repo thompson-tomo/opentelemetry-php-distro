@@ -13,7 +13,7 @@ use OTelDistroTests\Util\HttpStatusCodes;
 use OTelDistroTests\Util\Log\LogCategoryForTests;
 use OTelDistroTests\Util\Log\Logger;
 
-final class ResourcesClient
+final class ResourcesCleanerClient
 {
     private Logger $logger;
 

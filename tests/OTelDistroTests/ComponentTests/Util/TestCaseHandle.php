@@ -201,7 +201,7 @@ final class TestCaseHandle implements LoggableInterface
         return $this->resourcesCleaner;
     }
 
-    public function getResourcesClient(): ResourcesClient
+    public function getResourcesCleanerClient(): ResourcesCleanerClient
     {
         return $this->resourcesCleaner->getClient();
     }

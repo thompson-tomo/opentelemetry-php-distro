@@ -18,7 +18,7 @@ use OTelDistroTests\ComponentTests\Util\OtlpData\Span;
 use OTelDistroTests\ComponentTests\Util\OtlpData\SpanKind;
 use OTelDistroTests\ComponentTests\Util\PhpSerializationUtil;
 use OTelDistroTests\ComponentTests\Util\RequestHeadersRawSnapshotSource;
-use OTelDistroTests\ComponentTests\Util\ResourcesClient;
+use OTelDistroTests\ComponentTests\Util\ResourcesCleanerClient;
 use OTelDistroTests\ComponentTests\Util\SpanExpectationsBuilder;
 use OTelDistroTests\ComponentTests\Util\UrlUtil;
 use OTelDistroTests\ComponentTests\Util\WaitForOTelSignalCounts;
@@ -46,7 +46,7 @@ final class CurlAutoInstrumentationTest extends ComponentTestCaseBase
 {
     private const AUTO_INSTRUMENTATION_NAME = 'curl';
 
-    private const RESOURCES_CLIENT_KEY = 'resources_client';
+    private const RESOURCES_CLEANER_CLIENT_KEY = 'resources_cleaner_client';
     private const HTTP_APP_CODE_REQUEST_PARAMS_FOR_SERVER_KEY = 'http_app_code_request_params_for_server';
     private const HTTP_REQUEST_HEADER_NAME_PREFIX = 'OTel_PHP_distro_custom_header_';
     private const SERVER_RESPONSE_BODY = 'Response from server app code body';
@@ -119,11 +119,11 @@ final class CurlAutoInstrumentationTest extends ComponentTestCaseBase
         }
 
         $requestParams = $appCodeRequestArgs->getObject(self::HTTP_APP_CODE_REQUEST_PARAMS_FOR_SERVER_KEY, HttpAppCodeRequestParams::class);
-        $resourcesClient = $appCodeRequestArgs->getObject(self::RESOURCES_CLIENT_KEY, ResourcesClient::class);
+        $resourcesCleanerClient = $appCodeRequestArgs->getObject(self::RESOURCES_CLEANER_CLIENT_KEY, ResourcesCleanerClient::class);
 
         $curlHandleRaw = curl_init(UrlUtil::buildFullUrl($requestParams->urlParts));
         self::assertInstanceOf(CurlHandle::class, $curlHandleRaw);
-        $curlHandle = new CurlHandleForTests($curlHandleRaw, $resourcesClient);
+        $curlHandle = new CurlHandleForTests($curlHandleRaw, $resourcesCleanerClient);
 
         self::assertTrue($curlHandle->setOpt(CURLOPT_CONNECTTIMEOUT, HttpClientUtilForTests::CONNECT_TIMEOUT_SECONDS));
         self::assertTrue($curlHandle->setOpt(CURLOPT_TIMEOUT, HttpClientUtilForTests::TIMEOUT_SECONDS));
@@ -191,15 +191,15 @@ final class CurlAutoInstrumentationTest extends ComponentTestCaseBase
             },
             dbgInstanceName: 'client for cUrl request',
         );
-        $resourcesClient = $testCaseHandle->getResourcesClient();
+        $resourcesCleanerClient = $testCaseHandle->getResourcesCleanerClient();
 
         $clientAppCode->execAppCode(
             AppCodeTarget::asRouted([__CLASS__, 'appCodeClient']),
-            function (AppCodeRequestParams $clientAppCodeReqParams) use ($testArgs, $appCodeRequestParamsForServer, $resourcesClient): void {
+            function (AppCodeRequestParams $clientAppCodeReqParams) use ($testArgs, $appCodeRequestParamsForServer, $resourcesCleanerClient): void {
                 $clientAppCodeReqParams->setAppCodeRequestArgs(
                     [
                         self::HTTP_APP_CODE_REQUEST_PARAMS_FOR_SERVER_KEY => $appCodeRequestParamsForServer,
-                        self::RESOURCES_CLIENT_KEY                        => $resourcesClient,
+                        self::RESOURCES_CLEANER_CLIENT_KEY => $resourcesCleanerClient,
                     ]
                     + $testArgs->cloneAsArray()
                 );

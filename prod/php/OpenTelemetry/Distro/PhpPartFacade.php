@@ -10,7 +10,6 @@ use OpenTelemetry\Distro\HttpTransport\NativeHttpTransportFactory;
 use OpenTelemetry\Distro\InferredSpans\InferredSpans;
 use OpenTelemetry\Distro\Log\LogFeature;
 use OpenTelemetry\Distro\Log\NativeLogWriter;
-use OpenTelemetry\Distro\Util\BoolUtil;
 use OpenTelemetry\Distro\Util\HiddenConstructorTrait;
 use OpenTelemetry\API\Globals;
 use OpenTelemetry\Distro\Util\OTelUtil;
@@ -50,7 +49,7 @@ final class PhpPartFacade
     private static array $remoteConfigConsumers = [];
     private ?InferredSpans $inferredSpans = null;
 
-    private const IS_DISTRO_ENABLED_ENV_VAR_NAME = 'OTEL_PHP_ENABLED';
+    public const ENABLED_OPT_NAME = 'enabled';
     public const USER_BOOTSTRAP_PHP_FILE_OPT_NAME = 'user_bootstrap_php_file';
 
     /**
@@ -68,7 +67,6 @@ final class PhpPartFacade
 
         require __DIR__ . DIRECTORY_SEPARATOR . 'BootstrapStageLogger.php';
         require __DIR__ . DIRECTORY_SEPARATOR . 'Util/StaticClassTrait.php';
-        require __DIR__ . DIRECTORY_SEPARATOR . 'Util/BoolUtil.php';
 
         BootstrapStageLogger::configure($maxEnabledLogLevel, __DIR__, __NAMESPACE__);
         self::logDebug(__LINE__, __FUNCTION__, 'Starting bootstrap sequence...', compact('nativePartVersion', 'maxEnabledLogLevel', 'requestInitStartTime'));
@@ -161,16 +159,11 @@ final class PhpPartFacade
 
     private static function isDistroEnabled(): bool
     {
-        return self::getBoolEnvVar(self::IS_DISTRO_ENABLED_ENV_VAR_NAME, default: true);
-    }
-
-    public static function getBoolEnvVar(string $envVarName, bool $default): bool
-    {
-        $envVarVal = getenv($envVarName);
-        if (is_string($envVarVal) && (($parsedVal = BoolUtil::parseValue($envVarVal)) !== null)) {
-            return $parsedVal;
-        }
-        return $default;
+        /**
+         * Use fully qualified names for functions implemented by the extension to make sure scoper correctly detects them
+         * @noinspection PhpUnnecessaryFullyQualifiedNameInspection
+         */
+        return (bool)\OpenTelemetry\Distro\get_config_option_by_name(self::ENABLED_OPT_NAME);
     }
 
     /**

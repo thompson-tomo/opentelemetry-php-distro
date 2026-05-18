@@ -8,6 +8,7 @@ use OpenTelemetry\Distro\Log\LogLevel;
 use OTelDistroTests\ComponentTests\Util\OtlpData\Span;
 use OTelDistroTests\Util\AmbientContextForTests;
 use OTelDistroTests\Util\ArrayUtilForTests;
+use OTelDistroTests\Util\AssertEx;
 use OTelDistroTests\Util\ClassNameUtil;
 use OTelDistroTests\Util\Config\CompositeRawSnapshotSource;
 use OTelDistroTests\Util\Config\ConfigSnapshotForProd;
@@ -17,6 +18,7 @@ use OTelDistroTests\Util\Config\OptionsForProdMetadata;
 use OTelDistroTests\Util\Config\Parser as ConfigParser;
 use OTelDistroTests\Util\DataProviderForTestBuilder;
 use OTelDistroTests\Util\DebugContext;
+use OTelDistroTests\Util\DebugContextScopeRef;
 use OTelDistroTests\Util\IterableUtil;
 use OTelDistroTests\Util\Log\LoggableToString;
 use OTelDistroTests\Util\Log\LogLevelUtil;
@@ -36,6 +38,7 @@ class ComponentTestCaseBase extends TestCaseBase
     protected const SHOULD_APP_CODE_CREATE_DUMMY_SPAN_KEY = 'should_app_code_create_dummy_span';
     protected const APP_CODE_DUMMY_SPAN_NAME = 'app_code_dummy_span_name';
 
+    protected const SUB_APP_CODE_TO_CALL_KEY = 'app_sub_code_to_call';
     protected const DID_APP_CODE_FINISH_SUCCESSFULLY_KEY = 'is_app_code_finished_successfully';
     protected const THROWABLE_FROM_APP_CODE_KEY = 'throwable_from_app_code';
 
@@ -76,32 +79,82 @@ class ComponentTestCaseBase extends TestCaseBase
     }
 
     /**
-     * @param ?callable(): array<string, mixed> $appCodeImpl
-     *
      * @noinspection PhpDocMissingThrowsInspection
      */
-    public static function appCodeSetsHowFinished(MixedMap $appCodeRequestArgs, ?callable $appCodeImpl = null): void
+    public static function appCodeSetsHowFinished(MixedMap $appCodeRequestArgs): void
     {
         $logger = self::getLoggerStatic(__NAMESPACE__, __CLASS__, __FILE__);
         $loggerProxyDebug = $logger->ifDebugLevelEnabledNoLine(__FUNCTION__);
         $logger->addAllContext(compact('appCodeRequestArgs'));
 
-        $loggerProxyDebug?->log(__LINE__, 'Calling $appCodeImpl() ...');
+        $subAppCode = $appCodeRequestArgs->tryGetArray(self::SUB_APP_CODE_TO_CALL_KEY);
+        $appCodeAuxOutput = [];
         try {
-            $appCodeContextData = [];
-            if ($appCodeImpl !== null) {
-                $appCodeContextData = $appCodeImpl();
+            if ($subAppCode !== null) {
+                self::assertIsCallable($subAppCode);
+                $loggerProxyDebug?->log(__LINE__, 'Calling $subAppCode() ...', compact('subAppCode', 'appCodeRequestArgs'));
+                $appSubCodeContextData = $subAppCode($appCodeRequestArgs);
+                if ($appSubCodeContextData !== null) {
+                    self::assertIsArray($appSubCodeContextData);
+                    /** @var array<string, mixed> $appSubCodeContextData */
+                    ArrayUtilForTests::append($appSubCodeContextData, /* in,out */ $appCodeAuxOutput);
+                }
             }
-            $loggerProxyDebug?->log(__LINE__, 'Call to $appCodeImpl() finished successfully');
+            $loggerProxyDebug && $loggerProxyDebug->log(__LINE__, 'Call to $appCodeImpl() finished successfully');
         } catch (Throwable $throwable) {
-            $loggerProxyDebug?->logThrowable(__LINE__, $throwable, 'Call to $appCodeImpl() thrown');
-            ArrayUtilForTests::addAssertingKeyNew(self::DID_APP_CODE_FINISH_SUCCESSFULLY_KEY, false, /* in,out */ $appCodeContextData);
-            ArrayUtilForTests::addAssertingKeyNew(self::THROWABLE_FROM_APP_CODE_KEY, LoggableToString::convert($throwable), /* in,out */ $appCodeContextData);
-            AppCodeContextDataUtil::writeDataToTempFile($appCodeContextData, $appCodeRequestArgs);
+            $loggerProxyDebug && $loggerProxyDebug->logThrowable(__LINE__, $throwable, 'Call to $appCodeImpl() thrown');
+            ArrayUtilForTests::addAssertingKeyNew(self::DID_APP_CODE_FINISH_SUCCESSFULLY_KEY, false, /* in,out */ $appCodeAuxOutput);
+            ArrayUtilForTests::addAssertingKeyNew(self::THROWABLE_FROM_APP_CODE_KEY, LoggableToString::convert($throwable), /* in,out */ $appCodeAuxOutput);
+            AppCodeAuxOutputUtil::writeDataToTempFile($appCodeAuxOutput, $appCodeRequestArgs);
             throw $throwable;
         }
-        ArrayUtilForTests::addAssertingKeyNew(self::DID_APP_CODE_FINISH_SUCCESSFULLY_KEY, true, /* in,out */ $appCodeContextData);
-        AppCodeContextDataUtil::writeDataToTempFile($appCodeContextData, $appCodeRequestArgs);
+        ArrayUtilForTests::addAssertingKeyNew(self::DID_APP_CODE_FINISH_SUCCESSFULLY_KEY, true, /* in,out */ $appCodeAuxOutput);
+        AppCodeAuxOutputUtil::writeDataToTempFile($appCodeAuxOutput, $appCodeRequestArgs);
+    }
+
+    /**
+     * @phpstan-param ?callable(MixedMap): (void|array<string, mixed>) $subAppCode
+     * @phpstan-param ?positive-int $expectedMinSpanCount
+     * @phpstan-param ?callable(DebugContextScopeRef $dbgCtx, AgentBackendComms $agentBackendComms, MixedMap $appCodeAuxOutput): void $additionalAssertCode
+     */
+    protected function implTestForAppCodeSetsHowFinished(MixedMap $testArgs, ?callable $subAppCode = null, ?int $expectedMinSpanCount = null, ?callable $additionalAssertCode = null): void
+    {
+        DebugContext::getCurrentScope(/* out */ $dbgCtx);
+
+        $testCaseHandle = $this->getTestCaseHandle();
+
+        $appCodeHost = $testCaseHandle->ensureMainAppCodeHost(
+            function (AppCodeHostParams $appCodeHostParams) use ($testArgs): void {
+                self::ensureTransactionSpanEnabled($appCodeHostParams);
+                self::disableTimingDependentFeatures($appCodeHostParams);
+                self::copyProdOptionsToAppCodeHostParams($testArgs, $appCodeHostParams);
+            }
+        );
+
+        /** @var array<string, mixed> $appCodeRequestArgs */
+        $appCodeRequestArgs = $testArgs->cloneAsArray();
+        AppCodeAuxOutputUtil::createTempFile(__CLASS__, $testCaseHandle, /* in,out */ $appCodeRequestArgs);
+
+        ArrayUtilForTests::addAssertingKeyNew(self::SUB_APP_CODE_TO_CALL_KEY, $subAppCode, /* in,out */ $appCodeRequestArgs);
+        $appCodeHost->execAppCode(
+            AppCodeTarget::asRouted([__CLASS__, 'appCodeSetsHowFinished']),
+            function (AppCodeRequestParams $appCodeRequestParams) use ($appCodeRequestArgs): void {
+                $appCodeRequestParams->setAppCodeRequestArgs($appCodeRequestArgs);
+            }
+        );
+
+        $agentBackendComms = $testCaseHandle->waitForEnoughAgentBackendComms(WaitForOTelSignalCounts::spans(min: $expectedMinSpanCount ?? 1)); // 1 span (the root span) is the default
+        $dbgCtx->add(compact('agentBackendComms'));
+
+        // Assert
+
+        $appCodeAuxOutput = AppCodeAuxOutputUtil::readDataAsMixedMapFromTempFile($appCodeRequestArgs);
+        $dbgCtx->add(compact('appCodeAuxOutput'));
+        self::assertTrue($appCodeAuxOutput->getBool(self::DID_APP_CODE_FINISH_SUCCESSFULLY_KEY));
+
+        if ($additionalAssertCode !== null) {
+            $additionalAssertCode($dbgCtx, $agentBackendComms, $appCodeAuxOutput);
+        }
     }
 
     public static function appCodeCreatesDummySpan(MixedMap $appCodeRequestArgs): void
@@ -473,26 +526,28 @@ class ComponentTestCaseBase extends TestCaseBase
             : CliScriptAppCodeHostHandle::getRunScriptNameFullPath();
     }
 
-    protected static function disableTimingDependentFeatures(AppCodeHostParams $appCodeParams): void
+    protected static function disableTimingDependentFeatures(AppCodeHostParams $appCodeHostParams): void
     {
-        $appCodeParams->setProdOption(OptionForProdName::inferred_spans_enabled, false);
+        $appCodeHostParams->setProdOption(OptionForProdName::inferred_spans_enabled, false);
     }
 
-    protected static function ensureTransactionSpanEnabled(AppCodeHostParams $appCodeParams): void
+    protected static function ensureTransactionSpanEnabled(AppCodeHostParams $appCodeHostParams): void
     {
-        $appCodeParams->setProdOption(OptionForProdName::transaction_span_enabled, true);
-        $appCodeParams->setProdOption(OptionForProdName::transaction_span_enabled_cli, true);
+        $appCodeHostParams->setProdOption(OptionForProdName::transaction_span_enabled, true);
+        $appCodeHostParams->setProdOption(OptionForProdName::transaction_span_enabled_cli, true);
     }
 
-    protected static function copyProdOptionsToAppCodeHostParams(MixedMap $testArgs, AppCodeHostParams $appCodeParams): void
+    protected static function copyProdOptionsToAppCodeHostParams(MixedMap $testArgs, AppCodeHostParams $appCodeHostParams): void
     {
         DebugContext::getCurrentScope(/* out */ $dbgCtx);
         $dbgCtx->pushSubScope();
         foreach ($testArgs as $testArgKey => $testArgVal) {
-            if ((($optName = OptionForProdName::tryToFindByName($testArgKey)) !== null) && ($testArgVal !== OptionsForProdMetadata::get()[$optName->name]->defaultValue())) {
+            if (array_key_exists($testArgKey, OptionsForProdMetadata::get())) {
                 $dbgCtx->resetTopSubScope(compact('testArgKey', 'testArgVal'));
-                self::assertTrue(is_string($testArgVal) || is_int($testArgVal) || is_float($testArgVal) || is_bool($testArgVal));
-                $appCodeParams->setProdOption($optName, $testArgVal);
+                $appCodeHostParams->setProdOptionIfNotDefault(
+                    AssertEx::notNull(OptionForProdName::tryToFindByName($testArgKey)),
+                    $testArgVal === null ? null : AppCodeHostParams::assertValidProdOptionValueType($testArgVal, $testArgKey),
+                );
             }
         }
         $dbgCtx->popSubScope();

@@ -5,10 +5,8 @@ declare(strict_types=1);
 namespace OTelDistroTests\ComponentTests;
 
 use OpenTelemetry\Distro\Util\TextUtil;
+use OTelDistroTests\ComponentTests\Util\AgentBackendComms;
 use OTelDistroTests\ComponentTests\Util\AppCodeContextUtil;
-use OTelDistroTests\ComponentTests\Util\AppCodeHostParams;
-use OTelDistroTests\ComponentTests\Util\AppCodeRequestParams;
-use OTelDistroTests\ComponentTests\Util\AppCodeTarget;
 use OTelDistroTests\ComponentTests\Util\ComponentTestCaseBase;
 use OTelDistroTests\ComponentTests\Util\DbAutoInstrumentationUtilForTests;
 use OTelDistroTests\ComponentTests\Util\MySqli\MySqliApiFacade;
@@ -17,12 +15,12 @@ use OTelDistroTests\ComponentTests\Util\MySqli\MySqliResultWrapped;
 use OTelDistroTests\ComponentTests\Util\MySqli\MySqliWrapped;
 use OTelDistroTests\ComponentTests\Util\SpanExpectations;
 use OTelDistroTests\ComponentTests\Util\SpanSequenceExpectations;
-use OTelDistroTests\ComponentTests\Util\WaitForOTelSignalCounts;
 use OTelDistroTests\Util\AmbientContextForTests;
 use OTelDistroTests\Util\AssertEx;
 use OTelDistroTests\Util\Config\OptionForProdName;
 use OTelDistroTests\Util\DataProviderForTestBuilder;
 use OTelDistroTests\Util\DebugContext;
+use OTelDistroTests\Util\DebugContextScopeRef;
 use OTelDistroTests\Util\IterableUtil;
 use OTelDistroTests\Util\Log\LoggableToString;
 use OTelDistroTests\Util\MixedMap;
@@ -349,8 +347,6 @@ final class MySqliAutoInstrumentationTest extends ComponentTestCaseBase
         ($loggerProxy = $logger->ifTraceLevelEnabled(__LINE__, __FUNCTION__))
         && $loggerProxy->log('Entered', ['$testArgs' => $testArgs]);
 
-        $isAutoInstrumentationEnabled = $testArgs->getBool(self::IS_AUTO_INSTRUMENTATION_ENABLED_KEY);
-
         $isOOPApi = $testArgs->getBool(self::IS_OOP_API_KEY);
         $connectDbName = $testArgs->getNullableString(self::CONNECT_DB_NAME_KEY);
         $workDbName = $testArgs->getString(self::WORK_DB_NAME_KEY);
@@ -358,9 +354,10 @@ final class MySqliAutoInstrumentationTest extends ComponentTestCaseBase
         $wrapInTx = $testArgs->getBool(DbAutoInstrumentationUtilForTests::WRAP_IN_TX_KEY);
         $rollback = $testArgs->getBool(DbAutoInstrumentationUtilForTests::SHOULD_ROLLBACK_KEY);
 
+        $testArgsEx = $testArgs->clone();
         /** @var SpanExpectations[] $expectedDbSpans */
         $expectedDbSpans = [];
-        if ($isAutoInstrumentationEnabled) {
+        if ($testArgs->getBool(self::IS_AUTO_INSTRUMENTATION_ENABLED_KEY)) {
             $expectationsBuilder = (new MySqliDbSpanDataExpectationsBuilder($isOOPApi))
                 ->serverAddress(AssertEx::notNull(AmbientContextForTests::testConfig()->mysqlHost))
                 ->serverPort(AssertEx::notNull(AmbientContextForTests::testConfig()->mysqlPort));
@@ -392,42 +389,30 @@ final class MySqliAutoInstrumentationTest extends ComponentTestCaseBase
             }
 
             self::addExpectationsForResetDbState($expectationsBuilder, $queryKind, /* out */ $expectedDbSpans);
+        } else {
+            $testArgsEx[OptionForProdName::disabled_instrumentations->name] = self::AUTO_INSTRUMENTATION_NAME;
         }
-        $dbgCtx->add(compact('expectedDbSpans'));
+        $dbgCtx->add(compact('testArgsEx', 'expectedDbSpans'));
 
-        $appCodeRequestArgs = $testArgs->clone();
-        $appCodeRequestArgs[DbAutoInstrumentationUtilForTests::HOST_KEY] = AmbientContextForTests::testConfig()->mysqlHost;
-        $appCodeRequestArgs[DbAutoInstrumentationUtilForTests::PORT_KEY] = AmbientContextForTests::testConfig()->mysqlPort;
-        $appCodeRequestArgs[DbAutoInstrumentationUtilForTests::USER_KEY] = AmbientContextForTests::testConfig()->mysqlUser;
-        $appCodeRequestArgs[DbAutoInstrumentationUtilForTests::PASSWORD_KEY] = AmbientContextForTests::testConfig()->mysqlPassword;
+        $testArgsEx[DbAutoInstrumentationUtilForTests::HOST_KEY] = AmbientContextForTests::testConfig()->mysqlHost;
+        $testArgsEx[DbAutoInstrumentationUtilForTests::PORT_KEY] = AmbientContextForTests::testConfig()->mysqlPort;
+        $testArgsEx[DbAutoInstrumentationUtilForTests::USER_KEY] = AmbientContextForTests::testConfig()->mysqlUser;
+        $testArgsEx[DbAutoInstrumentationUtilForTests::PASSWORD_KEY] = AmbientContextForTests::testConfig()->mysqlPassword;
 
-        $testCaseHandle = $this->getTestCaseHandle();
-        $appCodeHost = $testCaseHandle->ensureMainAppCodeHost(
-            function (AppCodeHostParams $appCodeParams) use ($isAutoInstrumentationEnabled): void {
-                if (!$isAutoInstrumentationEnabled) {
-                    $appCodeParams->setProdOptionIfNotNull(OptionForProdName::disabled_instrumentations, self::AUTO_INSTRUMENTATION_NAME);
+        self::implTestForAppCodeSetsHowFinished(
+            testArgs: $testArgsEx,
+            subAppCode: [__CLASS__, 'appCodeForTestAutoInstrumentation'],
+            expectedMinSpanCount: 1 + count($expectedDbSpans), // +1 for automatic local root span
+            additionalAssertCode: function (DebugContextScopeRef $dbgCtx, AgentBackendComms $agentBackendComms) use ($expectedDbSpans): void {
+                $actualDbSpans = [];
+                foreach ($agentBackendComms->spans() as $span) {
+                    if ($span->attributes->keyExists(DbAttributes::DB_SYSTEM_NAME)) {
+                        $actualDbSpans[] = $span;
+                    }
                 }
-                self::disableTimingDependentFeatures($appCodeParams);
-            }
+                (new SpanSequenceExpectations($expectedDbSpans))->assertMatches($actualDbSpans);
+            },
         );
-        $appCodeHost->execAppCode(
-            AppCodeTarget::asRouted([__CLASS__, 'appCodeForTestAutoInstrumentation']),
-            function (AppCodeRequestParams $appCodeRequestParams) use ($appCodeRequestArgs): void {
-                $appCodeRequestParams->setAppCodeRequestArgs($appCodeRequestArgs);
-            }
-        );
-
-        // +1 for automatic local root span
-        $agentBackendComms = $testCaseHandle->waitForEnoughAgentBackendComms(WaitForOTelSignalCounts::spans(1 + count($expectedDbSpans)));
-        $dbgCtx->add(compact('agentBackendComms'));
-
-        $actualDbSpans = [];
-        foreach ($agentBackendComms->spans() as $span) {
-            if ($span->attributes->keyExists(DbAttributes::DB_SYSTEM_NAME)) {
-                $actualDbSpans[] = $span;
-            }
-        }
-        (new SpanSequenceExpectations($expectedDbSpans))->assertMatches($actualDbSpans);
     }
 
     /**

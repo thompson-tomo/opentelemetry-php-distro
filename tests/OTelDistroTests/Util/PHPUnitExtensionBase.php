@@ -59,7 +59,7 @@ abstract class PHPUnitExtensionBase implements Extension
 
     public function __construct()
     {
-        ExceptionUtil::runCatchLogRethrow(
+        ExceptionUtil::runCatchWriteToStdErrRethrow(
             function (): void {
                 PHPUnitToLogConverters::register();
                 AmbientContextForTests::assertIsInited();

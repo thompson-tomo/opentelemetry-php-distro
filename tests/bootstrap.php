@@ -18,7 +18,7 @@ require $vendorAutoload;
 // Substitutes should be loaded IMMEDIATELY AFTER vendor
 require __DIR__ . '/substitutes/load.php';
 
-ExceptionUtil::runCatchLogRethrow(
+ExceptionUtil::runCatchWriteToStdErrRethrow(
     function (): void {
         RepoRootDir::setFullPath(__DIR__ . '/..');
 

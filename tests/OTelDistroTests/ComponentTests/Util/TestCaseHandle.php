@@ -9,6 +9,7 @@ use OpenTelemetry\Distro\Log\LogLevel;
 use OTelDistroTests\Util\AmbientContextForTests;
 use OTelDistroTests\Util\Config\OptionForProdName;
 use OTelDistroTests\Util\DebugContext;
+use OTelDistroTests\Util\ExceptionUtil;
 use OTelDistroTests\Util\Log\LogCategoryForTests;
 use OTelDistroTests\Util\Log\LoggableInterface;
 use OTelDistroTests\Util\Log\LoggableToString;
@@ -42,13 +43,19 @@ final class TestCaseHandle implements LoggableInterface
     public function __construct(
         private readonly ?LogLevel $escalatedLogLevelForProdCode,
     ) {
-        $this->logger = AmbientContextForTests::loggerFactory()->loggerForClass(LogCategoryForTests::TEST_INFRA, __NAMESPACE__, __CLASS__, __FILE__)->addAllContext(compact('this'));
+        $this->logger = AmbientContextForTests::loggerFactory()->loggerForClass(LogCategoryForTests::TEST_INFRA, __NAMESPACE__, __CLASS__, __FILE__);
 
-        $globalTestInfra = ComponentTestsPHPUnitExtension::getGlobalTestInfra();
-        $globalTestInfra->onTestStart();
-        $this->resourcesCleaner = $globalTestInfra->getResourcesCleaner();
-        $this->mockOTelCollector = $globalTestInfra->getMockOTelCollector();
-        $this->portsInUse = $globalTestInfra->getPortsInUse();
+        ExceptionUtil::runCatchLogRethrow(
+            function (): void {
+                $globalTestInfra = ComponentTestsPHPUnitExtension::getGlobalTestInfra();
+                $this->resourcesCleaner = $globalTestInfra->getResourcesCleaner();
+                $this->mockOTelCollector = $globalTestInfra->getMockOTelCollector();
+                $this->portsInUse = $globalTestInfra->getPortsInUse();
+                $globalTestInfra->onTestStart();
+            }
+        );
+
+        $this->logger->addAllContext(compact('this'));
     }
 
     /**
@@ -152,10 +159,13 @@ final class TestCaseHandle implements LoggableInterface
 
     public function tearDown(): void
     {
-        ($loggerProxy = $this->logger->ifDebugLevelEnabled(__LINE__, __FUNCTION__))
-        && $loggerProxy->log('Tearing down...');
+        ($loggerProxy = $this->logger->ifDebugLevelEnabled(__LINE__, __FUNCTION__)) && $loggerProxy->log('Tearing down...');
 
-        ComponentTestsPHPUnitExtension::getGlobalTestInfra()->onTestEnd();
+        ExceptionUtil::runCatchLogRethrow(
+            function (): void {
+                ComponentTestsPHPUnitExtension::getGlobalTestInfra()->onTestEnd();
+            }
+        );
     }
 
     /**

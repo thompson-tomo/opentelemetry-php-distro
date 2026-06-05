@@ -2,10 +2,13 @@
 #include "BridgeModuleGlobals.h"
 #include "AutoZval.h"
 #include "PhpBridge.h"
-
+#include "WithSpanAttributes.h"
 
 #include <main/php.h>
 #include <Zend/zend_API.h>
+
+#include <algorithm>
+#include <cctype>
 
 PHP_FUNCTION(detectOpcachePreload) {
     BRIDGE_G(globals)->logger->printf(LogLevel::logLevel_info, "detectOpcachePreload: %d", BRIDGE_G(globals)->bridge.detectOpcachePreload());
@@ -364,6 +367,107 @@ PHP_FUNCTION(getPhpVersionMajorMinor) {
     RETURN_ARR(zend_new_pair(&zMajor, &zMinor));
 }
 
+PHP_FUNCTION(getWithSpanMetadata) {
+    char *className  = nullptr;
+    size_t classLen  = 0;
+    char *methodName = nullptr;
+    size_t methodLen = 0;
+
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+    Z_PARAM_STRING(className, classLen)
+    Z_PARAM_STRING(methodName, methodLen)
+    ZEND_PARSE_PARAMETERS_END();
+
+    // Look up class (class_table keys are lowercase)
+    std::string lowerClass(className, classLen);
+    std::transform(lowerClass.begin(), lowerClass.end(), lowerClass.begin(), [](unsigned char c){ return std::tolower(c); });
+    auto ce = opentelemetry::php::findClassEntry(lowerClass);
+    if (!ce) {
+        BRIDGE_G(globals)->logger->printf(LogLevel::logLevel_error, "getWithSpanMetadata: class not found: %s", className);
+        RETURN_NULL();
+    }
+
+    // Look up method (function_table keys are lowercase)
+    std::string lowerMethod(methodName, methodLen);
+    std::transform(lowerMethod.begin(), lowerMethod.end(), lowerMethod.begin(), [](unsigned char c){ return std::tolower(c); });
+    auto *func = reinterpret_cast<zend_function *>(
+        zend_hash_str_find_ptr(&ce->function_table, lowerMethod.data(), lowerMethod.length()));
+    if (!func) {
+        BRIDGE_G(globals)->logger->printf(LogLevel::logLevel_error, "getWithSpanMetadata: method not found: %s::%s", className, methodName);
+        RETURN_NULL();
+    }
+
+    auto metaOpt = opentelemetry::php::readWithSpanMetadata(func);
+    if (!metaOpt) {
+        RETURN_NULL();
+    }
+
+    auto const &meta = *metaOpt;
+
+    // Build result array
+    opentelemetry::php::AutoZval result;
+    result.arrayInit();
+
+    // span_name
+    {
+        opentelemetry::php::AutoZval v;
+        if (meta.spanName) {
+            v.setString(*meta.spanName);
+        } else {
+            v.setNull();
+        }
+        result.arrayAddAssocWithRef("span_name", v);
+    }
+
+    // span_kind
+    {
+        opentelemetry::php::AutoZval v;
+        if (meta.spanKind) {
+            v.setLong(static_cast<zend_long>(*meta.spanKind));
+        } else {
+            v.setNull();
+        }
+        result.arrayAddAssocWithRef("span_kind", v);
+    }
+
+    // param_attributes
+    {
+        opentelemetry::php::AutoZval paramAttrs;
+        paramAttrs.arrayInit();
+        for (auto const &p : meta.paramAttributes) {
+            opentelemetry::php::AutoZval entry;
+            entry.arrayInit();
+            opentelemetry::php::AutoZval idxZv{static_cast<zend_long>(p.argIndex)};
+            opentelemetry::php::AutoZval keyZv;
+            keyZv.setString(p.attrKey);
+            entry.arrayAddAssocWithRef("arg_index", idxZv);
+            entry.arrayAddAssocWithRef("attr_key", keyZv);
+            paramAttrs.arrayAddNextWithRef(entry);
+        }
+        result.arrayAddAssocWithRef("param_attributes", paramAttrs);
+    }
+
+    // prop_attributes
+    {
+        opentelemetry::php::AutoZval propAttrs;
+        propAttrs.arrayInit();
+        for (auto const &p : meta.propAttributes) {
+            opentelemetry::php::AutoZval entry;
+            entry.arrayInit();
+            opentelemetry::php::AutoZval propZv;
+            propZv.setString(p.propName);
+            opentelemetry::php::AutoZval keyZv;
+            keyZv.setString(p.attrKey);
+            entry.arrayAddAssocWithRef("prop_name", propZv);
+            entry.arrayAddAssocWithRef("attr_key", keyZv);
+            propAttrs.arrayAddNextWithRef(entry);
+        }
+        result.arrayAddAssocWithRef("prop_attributes", propAttrs);
+    }
+
+    RETURN_COPY(result.get());
+}
+
 ZEND_BEGIN_ARG_INFO(no_paramters_arginfo, 0)
 ZEND_END_ARG_INFO()
 
@@ -394,6 +498,8 @@ const zend_function_entry phpbridge_functions[] = {
     PHP_FE( getCompiledFiles, no_paramters_arginfo )
     PHP_FE( getNewlyCompiledFiles, no_paramters_arginfo )
     PHP_FE( getPhpVersionMajorMinor, no_paramters_arginfo )
+
+    PHP_FE( getWithSpanMetadata, no_paramters_arginfo )
 
     PHP_FE_END
 };

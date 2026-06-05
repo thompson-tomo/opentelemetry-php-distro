@@ -86,6 +86,12 @@ opentelemetry_distro.enabled=true
 | `OTEL_PHP_TRANSACTION_SPAN_ENABLED_CLI` | `true` | `true` or `false` | Auto root span for CLI |
 | `OTEL_PHP_TRANSACTION_URL_GROUPS` | (empty) | Comma-separated wildcards | URL grouping patterns |
 
+### Attribute-based instrumentation
+
+| Option | Default | Accepted values | Description |
+| --- | --- | --- | --- |
+| `OTEL_PHP_ATTR_HOOKS_ENABLED` | `false` | `true` or `false` | Enables `#[WithSpan]` / `#[SpanAttribute]` attribute-based span creation. See [Attribute-based instrumentation](attribute-instrumentation.md). |
+
 ### Inferred spans
 
 | Option | Default | Accepted values | Description |

@@ -60,6 +60,7 @@ Supported PHP versions: `8.1` to `8.5`.
 - Automatic root span creation
 - Root span URL grouping
 - Inferred spans
+- [Attribute-based instrumentation](attribute-instrumentation.md) (`#[WithSpan]`, `#[SpanAttribute]`)
 - Background telemetry sending
 
 Background sending (non-blocking export) works with OTLP `http/protobuf` (default). If exporter/protocol changes to unsupported transport (for example gRPC), export becomes synchronous.

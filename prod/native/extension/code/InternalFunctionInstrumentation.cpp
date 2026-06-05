@@ -2,12 +2,15 @@
 #include "InternalFunctionInstrumentation.h"
 #include "AutoZval.h"
 #include "PhpBridge.h"
+#include "WithSpanAttributes.h"
+#include "AttrHooksStorage.h"
 #include "LoggerInterface.h"
 
 #include "Zend/zend.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_hash.h"
 #include "Zend/zend_globals.h"
+#include <Zend/zend_attributes.h>
 #include <Zend/zend_observer.h>
 
 
@@ -24,6 +27,141 @@ namespace opentelemetry::php {
 using namespace std::literals;
 
 using InternalStorage_t = InternalFunctionInstrumentationStorage<zend_ulong, zif_handler>;
+
+// Forward declaration — defined later in this file.
+void handleAndReleaseHookException(zend_object *exception);
+
+/// Calls WithSpanHandler::pre(target, params, class, function, filename, lineno, span_args, attributes)
+/// from the observer begin handler when #[WithSpan] is present.
+static void callWithSpanHandlerPre(zend_execute_data *execute_data, WithSpanMetadata const &meta) {
+    if (!OTEL_GL(requestScope_)->isFunctional()) {
+        return;
+    }
+
+    bool scoped = OTEL_GL(config_)->get().scoped_deps_enabled;
+
+    // Parameters 0-5: standard pre-hook arguments (same as callPreHook)
+    std::array<AutoZval, 8> params;
+    getScopeNameOrThis(params[0].get(), execute_data);
+    getCallArguments(params[1].get(), execute_data);
+    getFunctionDeclaringScope(params[2].get(), execute_data);
+    getFunctionName(params[3].get(), execute_data);
+    getFunctionDeclarationFileName(params[4].get(), execute_data);
+    getFunctionDeclarationLineNo(params[5].get(), execute_data);
+
+    // Parameter 6: span_args array {'name': ..., 'span_kind': ...}
+    params[6].arrayInit();
+    if (meta.spanName) {
+        add_assoc_stringl(params[6].get(), "name", meta.spanName->c_str(), meta.spanName->length());
+    }
+    if (meta.spanKind) {
+        add_assoc_long(params[6].get(), "span_kind", static_cast<zend_long>(*meta.spanKind));
+    }
+
+    // Parameter 7: attributes array — start with static attrs from #[WithSpan(attributes: [...])]
+    params[7].arrayInit();
+
+    // Re-read WithSpan::$attributes arg (positional 2 / named 'attributes') from op_array
+    if (execute_data->func->common.attributes) {
+        constexpr std::string_view withSpanLcName = "opentelemetry\\api\\instrumentation\\withspan"sv;
+        zend_attribute *wsAttr = zend_get_attribute_str(execute_data->func->common.attributes, withSpanLcName.data(), withSpanLcName.size());
+        if (wsAttr) {
+            // Find the 'attributes' arg: positional index 2, or named 'attributes'
+            for (uint32_t i = 0; i < wsAttr->argc; i++) {
+                bool isAttrsArg = false;
+                if (!wsAttr->args[i].name && i == 2) {
+                    isAttrsArg = true;
+                } else if (wsAttr->args[i].name) {
+                    std::string_view n{ZSTR_VAL(wsAttr->args[i].name), ZSTR_LEN(wsAttr->args[i].name)};
+                    isAttrsArg = (n == "attributes");
+                }
+                if (isAttrsArg) {
+                    zval resolved;
+                    ZVAL_UNDEF(&resolved);
+                    if (zend_get_attribute_value(&resolved, wsAttr, i, execute_data->func->common.scope) == SUCCESS && Z_TYPE(resolved) == IS_ARRAY) {
+                        zend_string *attrKey = nullptr;
+                        zval *val = nullptr;
+                        ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARR(resolved), attrKey, val) {
+                            if (attrKey && val) {
+                                zval copy;
+                                ZVAL_COPY(&copy, val);
+                                zend_hash_update(Z_ARR_P(params[7].get()), attrKey, &copy);
+                            }
+                        }
+                        ZEND_HASH_FOREACH_END();
+                        zval_ptr_dtor(&resolved);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Append parameter attribute values: read actual arg at call time
+    for (auto const &p : meta.paramAttributes) {
+        if (p.argIndex < ZEND_CALL_NUM_ARGS(execute_data)) {
+            zval *arg = ZEND_CALL_ARG(execute_data, p.argIndex + 1);
+            if (arg && Z_TYPE_P(arg) != IS_UNDEF) {
+                zval copy;
+                ZVAL_COPY(&copy, arg);
+                add_assoc_zval_ex(params[7].get(), p.attrKey.c_str(), p.attrKey.length(), &copy);
+            }
+        }
+    }
+
+    // Append property attribute values: read from $this
+    if (!meta.propAttributes.empty() && Z_TYPE(execute_data->This) == IS_OBJECT) {
+        auto ce = Z_OBJCE(execute_data->This);
+        for (auto const &p : meta.propAttributes) {
+            auto *prop = getClassPropertyValue(ce, Z_OBJ(execute_data->This), p.propName);
+            if (prop && Z_TYPE_P(prop) != IS_UNDEF) {
+                zval copy;
+                ZVAL_COPY(&copy, prop);
+                add_assoc_zval_ex(params[7].get(), p.attrKey.c_str(), p.attrKey.length(), &copy);
+            }
+        }
+    }
+
+    constexpr std::string_view handlerPreUnscoped = "OpenTelemetry\\API\\Instrumentation\\WithSpanHandler::pre"sv;
+    auto handlerName = scoped ? PHP_SCOPER_PREFIX "OpenTelemetry\\API\\Instrumentation\\WithSpanHandler::pre"sv : handlerPreUnscoped;
+
+    AutoZval rv;
+    try {
+        AutomaticExceptionStateRestorer restorer;
+        callMethod(nullptr, handlerName, params[0].get(), static_cast<int32_t>(params.size()), rv.get());
+        handleAndReleaseHookException(EG(exception));
+    } catch (std::exception const &e) {
+        ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "callWithSpanHandlerPre exception: %s", e.what());
+    }
+}
+
+/// Calls WithSpanHandler::post(target, params, result, exception)
+/// from the observer end handler when #[WithSpan] is present.
+static void callWithSpanHandlerPost(zend_execute_data *execute_data, zval *retval, zend_object *exception) {
+    if (!OTEL_GL(requestScope_)->isFunctional()) {
+        return;
+    }
+
+    bool scoped = OTEL_GL(config_)->get().scoped_deps_enabled;
+
+    std::array<AutoZval, 4> params;
+    getScopeNameOrThis(params[0].get(), execute_data);
+    getCallArguments(params[1].get(), execute_data);
+    getFunctionReturnValue(params[2].get(), retval);
+    getCurrentException(params[3].get(), exception);
+
+    constexpr std::string_view handlerPostUnscoped = "OpenTelemetry\\API\\Instrumentation\\WithSpanHandler::post"sv;
+    auto handlerName = scoped ? PHP_SCOPER_PREFIX "OpenTelemetry\\API\\Instrumentation\\WithSpanHandler::post"sv : handlerPostUnscoped;
+
+    AutoZval rv;
+    try {
+        AutomaticExceptionStateRestorer restorer;
+        callMethod(nullptr, handlerName, params[0].get(), static_cast<int32_t>(params.size()), rv.get());
+        handleAndReleaseHookException(EG(exception));
+    } catch (std::exception const &e) {
+        ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "callWithSpanHandlerPost exception: %s", e.what());
+    }
+}
 
 void handleAndReleaseHookException(zend_object *exception) {
     if (!exception || !instanceof_function(exception->ce, zend_ce_throwable)) {
@@ -357,22 +495,26 @@ void observerFcallBeginHandler(zend_execute_data *execute_data) {
     ELOGF_TRACE(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallBeginHandler hash 0x%X", hash);
 
     auto callbacks = reinterpret_cast<InstrumentedFunctionHooksStorage_t *>(OTEL_GL(hooksStorage_).get())->find(hash);
-    if (!callbacks) {
-        auto [cls, func] = getClassAndFunctionName(execute_data);
-        ELOGF_ERROR(OTEL_GL(logger_), INSTRUMENTATION, "Unable to find prehook handler for 0x%X " PRsv "::" PRsv, hash, PRsvArg(cls), PRsvArg(func));
-        return;
+    if (callbacks) {
+        for (auto &callback : *callbacks) {
+            try {
+                AutomaticExceptionStateRestorer restorer;
+                callPreHook(callback.first);
+                handleAndReleaseHookException(EG(exception));
+            } catch (std::exception const &e) {
+                auto [cls, func] = getClassAndFunctionName(execute_data);
+                ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallBeginHandler. Unable to call prehook for 0x%X " PRsv "::" PRsv ": '%s'", hash, PRsvArg(cls), PRsvArg(func), e.what());
+            }
+        }
     }
 
-    for (auto &callback : *callbacks) {
-        try {
-            AutomaticExceptionStateRestorer restorer;
-            callPreHook(callback.first);
-
-            handleAndReleaseHookException(EG(exception));
-        } catch (std::exception const &e) {
-            auto [cls, func] = getClassAndFunctionName(execute_data);
-            ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallBeginHandler. Unable to call prehook for 0x%X " PRsv "::" PRsv ": '%s'", hash, PRsvArg(cls), PRsvArg(func), e.what());
-        }
+    // Attribute-based WithSpan hook
+    auto const *attrMeta = AttrHooksStorage::getInstance().find(hash);
+    if (attrMeta) {
+        callWithSpanHandlerPre(execute_data, *attrMeta);
+    } else if (!callbacks) {
+        auto [cls, func] = getClassAndFunctionName(execute_data);
+        ELOGF_ERROR(OTEL_GL(logger_), INSTRUMENTATION, "Unable to find prehook handler for 0x%X " PRsv "::" PRsv, hash, PRsvArg(cls), PRsvArg(func));
     }
 }
 
@@ -381,21 +523,27 @@ void observerFcallEndHandler(zend_execute_data *execute_data, zval *retval) {
     ELOGF_TRACE(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallEndHandler hash 0x%X", hash);
 
     auto callbacks = reinterpret_cast<InstrumentedFunctionHooksStorage_t *>(OTEL_GL(hooksStorage_).get())->find(hash);
-    if (!callbacks) {
-        auto [cls, func] = getClassAndFunctionName(execute_data);
-        ELOGF_ERROR(OTEL_GL(logger_), INSTRUMENTATION, "Unable to find posthook handler for 0x%X " PRsv "::" PRsv, hash, PRsvArg(cls), PRsvArg(func));
-        return;
+    if (callbacks) {
+        for (auto &callback : *callbacks) {
+            try {
+                AutomaticExceptionStateRestorer restorer;
+                callPostHook(callback.second, retval, restorer.getException(), execute_data);
+                handleAndReleaseHookException(EG(exception));
+            } catch (std::exception const &e) {
+                auto [cls, func] = getClassAndFunctionName(execute_data);
+                ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallEndHandler. Unable to call posthook for 0x%X " PRsv "::" PRsv ": '%s'", hash, PRsvArg(cls), PRsvArg(func), e.what());
+            }
+        }
     }
 
-    for (auto &callback : *callbacks) {
-        try {
-            AutomaticExceptionStateRestorer restorer;
-            callPostHook(callback.second, retval, restorer.getException(), execute_data);
-            handleAndReleaseHookException(EG(exception));
-        } catch (std::exception const &e) {
-            auto [cls, func] = getClassAndFunctionName(execute_data);
-            ELOGF_CRITICAL(OTEL_GL(logger_), INSTRUMENTATION, "observerFcallEndHandler. Unable to call posthook for 0x%X " PRsv "::" PRsv ": '%s'", hash, PRsvArg(cls), PRsvArg(func), e.what());
-        }
+    // Attribute-based WithSpan hook
+    auto const *attrMeta = AttrHooksStorage::getInstance().find(hash);
+    if (attrMeta) {
+        AutomaticExceptionStateRestorer restorer;
+        callWithSpanHandlerPost(execute_data, retval, restorer.getException());
+    } else if (!callbacks) {
+        auto [cls, func] = getClassAndFunctionName(execute_data);
+        ELOGF_ERROR(OTEL_GL(logger_), INSTRUMENTATION, "Unable to find posthook handler for 0x%X " PRsv "::" PRsv, hash, PRsvArg(cls), PRsvArg(func));
     }
 }
 
@@ -450,24 +598,41 @@ zend_observer_fcall_handlers registerObserverHandlers(zend_execute_data *execute
         }
     }
 
-    if (!callbacks) {
+    // Attribute-based hooks: register if attr_hooks_enabled and #[WithSpan] is present.
+    // Works independently of user hooks registered via hook().
+    bool haveAttrHook = false;
+    if (OTEL_GL(config_)->get().attr_hooks_enabled) {
+        auto *func = execute_data->func;
+        if (hasWithSpanAttribute(func)) {
+            auto metaOpt = readWithSpanMetadata(func);
+            if (metaOpt) {
+                AttrHooksStorage::getInstance().store(hash, std::move(*metaOpt));
+                haveAttrHook = true;
+                ELOGF_DEBUG(OTEL_GL(logger_), INSTRUMENTATION, "registerObserverHandlers hash: 0x%X registered attribute hook (#[WithSpan])", hash);
+            }
+        }
+    }
+
+    if (!callbacks && !haveAttrHook) {
         return {nullptr, nullptr};
     }
 
-    bool havePreHook = false;
-    bool havePostHook = false;
-    for (auto const &item : *callbacks) {
-        if (!item.first.isNull()) {
-            havePreHook = true;
-        }
-        if (!item.second.isNull()) {
-            havePostHook = true;
-        }
-        if (havePreHook && havePostHook) {
-            break;
+    bool havePreHook = haveAttrHook;
+    bool havePostHook = haveAttrHook;
+    if (callbacks) {
+        for (auto const &item : *callbacks) {
+            if (!item.first.isNull()) {
+                havePreHook = true;
+            }
+            if (!item.second.isNull()) {
+                havePostHook = true;
+            }
+            if (havePreHook && havePostHook) {
+                break;
+            }
         }
     }
-    ELOGF_TRACE(OTEL_GL(logger_), INSTRUMENTATION, "registerObserverHandlers hash: 0x%X, havePreHooks: %d havePostHooks: %d", hash, havePreHook, havePostHook);
+    ELOGF_TRACE(OTEL_GL(logger_), INSTRUMENTATION, "registerObserverHandlers hash: 0x%X, havePreHooks: %d havePostHooks: %d haveAttrHook: %d", hash, havePreHook, havePostHook, haveAttrHook);
 
     return {havePreHook ? observerFcallBeginHandler : nullptr, havePostHook ? observerFcallEndHandler : nullptr};
 }

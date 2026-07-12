@@ -41,7 +41,7 @@ jobs:
     env:
       BUILD_ARCHITECTURE: ${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - if: ${{ matrix.goarch == 'arm64' }}
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
         with:

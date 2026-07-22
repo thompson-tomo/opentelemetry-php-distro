@@ -84,35 +84,46 @@ fetch_pr_for_commit() {
 }
 
 generate_otel_packages_section() {
-    local max_php_version
-    max_php_version=$(get_array_max_value ${_PROJECT_PROPERTIES_SUPPORTED_PHP_VERSIONS})
+    local packages=('open-telemetry/api' 'open-telemetry/sdk' 'open-telemetry/context')
 
-    local lock_file="$REPO_ROOT/generated_composer_lock_files/prod_${max_php_version}.lock"
-    if [[ ! -f "$lock_file" ]]; then
-        echo "_Could not find $lock_file — OTel package versions unavailable._"
-        echo
-        return
-    fi
-
-    local packages=('open-telemetry/api' 'open-telemetry/context' 'open-telemetry/sdk')
-
-    local links=()
-    for pkg in "${packages[@]}"; do
-        local pkg_version source_url release_url
-        pkg_version=$(jq -r --arg name "$pkg" 'first(.packages[] | select(.name==$name)) | .version // empty' "$lock_file")
-        source_url=$(jq -r --arg name "$pkg" 'first(.packages[] | select(.name==$name)) | .source.url // empty' "$lock_file")
-        if [[ -z "$pkg_version" || -z "$source_url" ]]; then
-            echo "Warning: package $pkg not found in $lock_file" >&2
-            continue
-        fi
-        release_url="${source_url%.git}/releases/tag/${pkg_version}"
-        links+=("[${pkg} ${pkg_version}](${release_url})")
-    done
+    # Get sorted PHP versions
+    local php_versions_raw=()
+    read -ra php_versions_raw <<< "$(get_array ${_PROJECT_PROPERTIES_SUPPORTED_PHP_VERSIONS})"
+    readarray -t php_versions < <(printf '%s\n' "${php_versions_raw[@]}" | sort -n)
 
     echo "### This release is based on the following OpenTelemetry PHP packages:"
     echo
-    for link in "${links[@]}"; do
-        echo "- ${link}"
+
+    for pkg in "${packages[@]}"; do
+        local -a versions=()
+        local all_same=true
+        local first_ver=""
+
+        for v in "${php_versions[@]}"; do
+            local lock_file="$REPO_ROOT/generated_composer_lock_files/prod_${v}.lock"
+            local ver="?"
+            if [[ -f "$lock_file" ]]; then
+                ver=$(jq -r --arg n "$pkg" 'first(.packages[] | select(.name==$n)) | .version // "?"' "$lock_file")
+            fi
+            versions+=("$ver")
+            if [[ -z "$first_ver" ]]; then
+                first_ver="$ver"
+            elif [[ "$ver" != "$first_ver" ]]; then
+                all_same=false
+            fi
+        done
+
+        if [[ "$all_same" == true ]]; then
+            echo "- [${pkg} ${first_ver}](https://packagist.org/packages/${pkg}#${first_ver})"
+        else
+            echo "- ${pkg}:"
+            for i in "${!php_versions[@]}"; do
+                local v="${php_versions[$i]}"
+                local ver="${versions[$i]}"
+                local php_fmt="${v:0:1}.${v:1}"
+                echo "  - PHP ${php_fmt}: [${ver}](https://packagist.org/packages/${pkg}#${ver})"
+            done
+        fi
     done
     echo
 }

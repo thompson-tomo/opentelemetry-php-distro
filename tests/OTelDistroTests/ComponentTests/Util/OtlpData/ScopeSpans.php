@@ -16,12 +16,14 @@ use Opentelemetry\Proto\Trace\V1\Span as OTelProtoSpan;
 class ScopeSpans
 {
     /**
-     * @param Span[] $spans
+     * @param Span[]   $spans
+     * @param string[] $discardedSpanIds span IDs of spans that were directly discarded from this scope
      */
     public function __construct(
         public readonly ?InstrumentationScope $scope,
         public readonly array $spans,
         public readonly string $schemaUrl,
+        public readonly array $discardedSpanIds = [],
     ) {
     }
 
@@ -30,17 +32,29 @@ class ScopeSpans
         $scope = DeserializationUtil::deserializeNullableFromOTelProto($source->getScope(), InstrumentationScope::deserializeFromOTelProto(...));
         $scopeName = $scope?->name;
 
+        $spans = [];
+        /** @var array<string, true> $discardedSpanIds */
+        $discardedSpanIds = [];
+        /** @var OTelProtoSpan $protoSpan */
+        foreach ($source->getSpans() as $protoSpan) {
+            $span = self::deserializeSpanFromOTelProto($protoSpan, $scopeName, /* ref */ $discardedSpanIds);
+            if ($span !== null) {
+                $spans[] = $span;
+            }
+        }
+
         return new self(
             scope: $scope,
-            spans: DeserializationUtil::deserializeArrayFromOTelProto(
-                $source->getSpans(),
-                fn(OTelProtoSpan $protoSpan) => self::deserializeSpanFromOTelProto($protoSpan, $scopeName)
-            ),
+            spans: $spans,
             schemaUrl: $source->getSchemaUrl(),
+            discardedSpanIds: array_keys($discardedSpanIds),
         );
     }
 
-    private static function deserializeSpanFromOTelProto(OTelProtoSpan $source, ?string $scopeName): ?Span
+    /**
+     * @param array<string, true> $discardedSpanIds
+     */
+    private static function deserializeSpanFromOTelProto(OTelProtoSpan $source, ?string $scopeName, array &$discardedSpanIds): ?Span
     {
         DebugContext::getCurrentScope(/* out */ $dbgCtx);
         $dbgCtx->add(compact('source'));
@@ -49,6 +63,7 @@ class ScopeSpans
         if (($reason = Span::reasonToDiscard($span)) !== null) {
             AmbientContextForTests::loggerFactory()->loggerForClass(LogCategoryForTests::TEST_INFRA, __NAMESPACE__, __CLASS__, __FILE__)->addAllContext(compact('source'))
                 ->logDebug(__FUNCTION__)?->with(__LINE__, 'Span discarded', compact('reason', 'span'));
+            $discardedSpanIds[$span->id] = true;
             return null;
         }
 

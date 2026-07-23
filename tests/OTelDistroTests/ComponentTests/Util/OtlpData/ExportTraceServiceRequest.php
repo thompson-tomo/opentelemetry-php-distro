@@ -37,6 +37,21 @@ class ExportTraceServiceRequest
         }
     }
 
+    /**
+     * Span IDs of spans discarded during deserialization (matched infra URL filter).
+     * Used by AgentBackendComms to build the cross-batch transitive discard set.
+     *
+     * @return iterable<string>
+     */
+    public function directlyDiscardedSpanIds(): iterable
+    {
+        foreach ($this->resourceSpans as $resourceSpans) {
+            foreach ($resourceSpans->scopeSpans as $scopeSpans) {
+                yield from $scopeSpans->discardedSpanIds;
+            }
+        }
+    }
+
     public function isEmptyAfterDeserialization(): bool
     {
         return IterableUtil::isEmpty($this->spans());
